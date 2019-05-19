@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <systemd/sd-bus.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 struct handler_ctx {
     sd_bus *bus;
@@ -22,8 +23,20 @@ static int handler(sd_bus_message *m, void *arg,
         fprintf(stderr, "Failed to read message: %s\n", strerror(-rc));
         return 0;
     }
+
+    /* Use the scheme described at
+     * https://www.freedesktop.org/wiki/Software/systemd/inhibit/
+     * under "Taking Delay Locks".
+     */
     if (before_sleep) {
-        (void)system("/usr/bin/xscreensaver-command -lock");
+        rc = system("xscreensaver-command -lock");
+        if (rc == -1) {
+            fprintf(stderr, "Failed to run xscreensaver-command\n");
+        }
+        else if (WEXITSTATUS(rc) != 0) {
+            fprintf(stderr, "xscreensaver-command failed with %d\n",
+                    WEXITSTATUS(rc));
+        }
 
         if (ctx->lock_fd != -1) {
             rc = close(ctx->lock_fd);
@@ -35,18 +48,33 @@ static int handler(sd_bus_message *m, void *arg,
         }
     }
     else {
-        (void)system("xset dpms force on");
-        (void)system("/usr/bin/xscreensaver-command -deactivate");
+        rc = system("xset dpms force on");
+        if (rc == -1) {
+            fprintf(stderr, "Failed to run xset\n");
+        }
+        else if (WEXITSTATUS(rc) != 0) {
+            fprintf(stderr, "xset failed with %d\n",
+                    WEXITSTATUS(rc));
+        }
+
+        rc = system("/usr/bin/xscreensaver-command -deactivate");
+        if (rc == -1) {
+            fprintf(stderr, "Failed to run xscreensaver-command\n");
+        }
+        else if (WEXITSTATUS(rc) != 0) {
+            fprintf(stderr, "xscreensaver-command exited with %d\n",
+                    WEXITSTATUS(rc));
+        }
 
         sd_bus_error error = SD_BUS_ERROR_NULL;
-        sd_bus_message *m = NULL;
+        sd_bus_message *reply = NULL;
         rc = sd_bus_call_method(ctx->bus,
                 "org.freedesktop.login1",
                 "/org/freedesktop/login1",
                 "org.freedesktop.login1.Manager",
                 "Inhibit",
                 &error,
-                &m,
+                &reply,
                 "ssss",
                 "sleep",
                 "xscreensaver",
@@ -56,14 +84,15 @@ static int handler(sd_bus_message *m, void *arg,
             fprintf(stderr, "Failed to call Inhibit(): %s\n", error.message);
             goto out;
         }
-        rc = sd_bus_message_read(m, "h", &ctx->lock_fd);
+        rc = sd_bus_message_read(reply, "h", &ctx->lock_fd);
         if (rc < 0) {
             fprintf(stderr, "Failed to read message: %s\n", strerror(-rc));
             goto out;
         }
 
 out:
-        // XXX drops the lock, why? sd_bus_message_unref(m);
+        /* XXX: This seems to drop the lock, why? */
+        /* sd_bus_message_unref(m); */
         sd_bus_error_free(&error);
     }
 
@@ -84,14 +113,14 @@ int main(int argc, char *argv[])
     ctx->bus = bus;
 
     sd_bus_error error = SD_BUS_ERROR_NULL;
-    sd_bus_message *m = NULL;
+    sd_bus_message *reply = NULL;
     rc = sd_bus_call_method(bus,
             "org.freedesktop.login1",
             "/org/freedesktop/login1",
             "org.freedesktop.login1.Manager",
             "Inhibit",
             &error,
-            &m,
+            &reply,
             "ssss",
             "sleep",
             "xscreensaver",
@@ -101,12 +130,13 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Failed to call Inhibit(): %s\n", error.message);
         goto out;
     }
-    rc = sd_bus_message_read(m, "h", &ctx->lock_fd);
+    rc = sd_bus_message_read(reply, "h", &ctx->lock_fd);
     if (rc < 0) {
         fprintf(stderr, "Failed to read message: %s\n", strerror(-rc));
         goto out;
     }
-    // XXX drops the lock, why? sd_bus_message_unref(m);
+    /* XXX: This seems to drop the lock, why? */
+    /* sd_bus_message_unref(reply); */
 
     const char *match =
         "type='signal',interface='org.freedesktop.login1.Manager'"
