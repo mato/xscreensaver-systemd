@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -7,9 +8,9 @@
 
 struct handler_ctx {
     sd_bus *bus;
-    int lock_fd;
+    sd_bus_message *lock;
 };
-static struct handler_ctx global_ctx = { .bus = NULL, .lock_fd = -1 };
+static struct handler_ctx global_ctx = { .bus = NULL, .lock = NULL };
 
 static int handler(sd_bus_message *m, void *arg,
         sd_bus_error *ret_error)
@@ -38,13 +39,13 @@ static int handler(sd_bus_message *m, void *arg,
                     WEXITSTATUS(rc));
         }
 
-        if (ctx->lock_fd != -1) {
-            rc = close(ctx->lock_fd);
-            if (rc != 0) {
-                fprintf(stderr, "Failed to release lock: %s\n",
-                        strerror(errno));
-            }
-            ctx->lock_fd = -1;
+        if (ctx->lock) {
+            sd_bus_message_unref(ctx->lock);
+            ctx->lock = NULL;
+        }
+        else {
+            fprintf(stderr,
+                    "warning: ctx->lock is NULL, this should not happen?\n");
         }
     }
     else {
@@ -84,15 +85,16 @@ static int handler(sd_bus_message *m, void *arg,
             fprintf(stderr, "Failed to call Inhibit(): %s\n", error.message);
             goto out;
         }
-        rc = sd_bus_message_read(reply, "h", &ctx->lock_fd);
+        int fd;
+        rc = sd_bus_message_read(reply, "h", &fd);
         if (rc < 0) {
             fprintf(stderr, "Failed to read message: %s\n", strerror(-rc));
             goto out;
         }
+        assert(fd >= 0);
+        ctx->lock = reply;
 
 out:
-        /* XXX: This seems to drop the lock, why? */
-        /* sd_bus_message_unref(m); */
         sd_bus_error_free(&error);
     }
 
@@ -130,13 +132,14 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Failed to call Inhibit(): %s\n", error.message);
         goto out;
     }
-    rc = sd_bus_message_read(reply, "h", &ctx->lock_fd);
+    int fd;
+    rc = sd_bus_message_read(reply, "h", &fd);
     if (rc < 0) {
         fprintf(stderr, "Failed to read message: %s\n", strerror(-rc));
         goto out;
     }
-    /* XXX: This seems to drop the lock, why? */
-    /* sd_bus_message_unref(reply); */
+    assert(fd >= 0);
+    ctx->lock = reply;
 
     const char *match =
         "type='signal',interface='org.freedesktop.login1.Manager'"
@@ -166,6 +169,7 @@ int main(int argc, char *argv[])
     }
 
 out:
+    sd_bus_message_unref(reply);
     sd_bus_slot_unref(slot);
     sd_bus_unref(bus);
     sd_bus_error_free(&error);
