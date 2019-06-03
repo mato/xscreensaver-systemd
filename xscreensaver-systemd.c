@@ -1,10 +1,11 @@
 #include <assert.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <err.h>
 #include <errno.h>
-#include <systemd/sd-bus.h>
-#include <unistd.h>
+#include <stdlib.h>
 #include <sys/wait.h>
+#include <unistd.h>
+
+#include <systemd/sd-bus.h>
 
 struct handler_ctx {
     sd_bus *bus;
@@ -21,7 +22,7 @@ static int handler(sd_bus_message *m, void *arg,
 
     rc = sd_bus_message_read(m, "b", &before_sleep);
     if (rc < 0) {
-        fprintf(stderr, "Failed to read message: %s\n", strerror(-rc));
+        warnx("Failed to read message: %s", strerror(-rc));
         return 0;
     }
 
@@ -32,11 +33,10 @@ static int handler(sd_bus_message *m, void *arg,
     if (before_sleep) {
         rc = system("xscreensaver-command -lock");
         if (rc == -1) {
-            fprintf(stderr, "Failed to run xscreensaver-command\n");
+            warnx("Failed to run xscreensaver-command");
         }
         else if (WEXITSTATUS(rc) != 0) {
-            fprintf(stderr, "xscreensaver-command failed with %d\n",
-                    WEXITSTATUS(rc));
+            warnx("xscreensaver-command failed with %d", WEXITSTATUS(rc));
         }
 
         if (ctx->lock) {
@@ -44,27 +44,24 @@ static int handler(sd_bus_message *m, void *arg,
             ctx->lock = NULL;
         }
         else {
-            fprintf(stderr,
-                    "warning: ctx->lock is NULL, this should not happen?\n");
+            warnx("Warning: ctx->lock is NULL, this should not happen?");
         }
     }
     else {
         rc = system("xset dpms force on");
         if (rc == -1) {
-            fprintf(stderr, "Failed to run xset\n");
+            warnx("Failed to run xset");
         }
         else if (WEXITSTATUS(rc) != 0) {
-            fprintf(stderr, "xset failed with %d\n",
-                    WEXITSTATUS(rc));
+            warnx("xset failed with %d", WEXITSTATUS(rc));
         }
 
         rc = system("/usr/bin/xscreensaver-command -deactivate");
         if (rc == -1) {
-            fprintf(stderr, "Failed to run xscreensaver-command\n");
+            warnx("Failed to run xscreensaver-command");
         }
         else if (WEXITSTATUS(rc) != 0) {
-            fprintf(stderr, "xscreensaver-command exited with %d\n",
-                    WEXITSTATUS(rc));
+            warnx("xscreensaver-command exited with %d", WEXITSTATUS(rc));
         }
 
         sd_bus_error error = SD_BUS_ERROR_NULL;
@@ -82,13 +79,13 @@ static int handler(sd_bus_message *m, void *arg,
                 "lock screen on suspend",
                 "delay");
         if (rc < 0) {
-            fprintf(stderr, "Failed to call Inhibit(): %s\n", error.message);
+            warnx("Failed to call Inhibit(): %s", error.message);
             goto out;
         }
         int fd;
         rc = sd_bus_message_read(reply, "h", &fd);
         if (rc < 0) {
-            fprintf(stderr, "Failed to read message: %s\n", strerror(-rc));
+            warnx("Failed to read message: %s", strerror(-rc));
             goto out;
         }
         assert(fd >= 0);
@@ -109,7 +106,7 @@ int main(int argc, char *argv[])
 
     int rc = sd_bus_open_system(&bus);
     if (rc < 0) {
-        fprintf(stderr, "Failed to connect to system bus: %s\n", strerror(-rc));
+        warnx("Failed to connect to system bus: %s", strerror(-rc));
         goto out;
     }
     ctx->bus = bus;
@@ -129,13 +126,13 @@ int main(int argc, char *argv[])
             "lock screen on suspend",
             "delay");
     if (rc < 0) {
-        fprintf(stderr, "Failed to call Inhibit(): %s\n", error.message);
+        warnx("Failed to call Inhibit(): %s", error.message);
         goto out;
     }
     int fd;
     rc = sd_bus_message_read(reply, "h", &fd);
     if (rc < 0) {
-        fprintf(stderr, "Failed to read message: %s\n", strerror(-rc));
+        warnx("Failed to read message: %s", strerror(-rc));
         goto out;
     }
     assert(fd >= 0);
@@ -146,14 +143,14 @@ int main(int argc, char *argv[])
         ",member='PrepareForSleep'";
     rc = sd_bus_add_match(bus, &slot, match, handler, &global_ctx);
     if (rc < 0) {
-        fprintf(stderr, "Failed to add match: %s\n", strerror(-rc));
+        warnx("Failed to add match: %s", strerror(-rc));
         goto out;
     }
 
     for (;;) {
         rc = sd_bus_process(bus, NULL);
         if (rc < 0) {
-            fprintf(stderr, "Failed to process bus: %s\n", strerror(-rc));
+            warnx("Failed to process bus: %s", strerror(-rc));
             goto out;
         }
         if (rc > 0)
@@ -163,7 +160,7 @@ int main(int argc, char *argv[])
         /* Wait for the next request to process */
         rc = sd_bus_wait(bus, (uint64_t) -1);
         if (rc < 0) {
-            fprintf(stderr, "Failed to wait on bus: %s\n", strerror(-rc));
+            warnx("Failed to wait on bus: %s", strerror(-rc));
             goto out;
         }
     }
