@@ -38,6 +38,9 @@ static int handler(sd_bus_message *m, void *arg,
         else if (WEXITSTATUS(rc) != 0) {
             warnx("xscreensaver-command failed with %d", WEXITSTATUS(rc));
         }
+        else {
+            sleep(1);
+        }
 
         if (ctx->lock) {
             sd_bus_message_unref(ctx->lock);
