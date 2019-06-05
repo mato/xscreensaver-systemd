@@ -1,3 +1,39 @@
+/* xscreensaver-systemd, Copyright (c) 2019 Martin Lucina <martin@lucina.net>
+ *
+ * ISC License
+ *
+ * Permission to use, copy, modify, and/or distribute this software
+ * for any purpose with or without fee is hereby granted, provided
+ * that the above copyright notice and this permission notice appear
+ * in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
+ * WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE
+ * AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR
+ * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+ * OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+ * NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+ * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ *
+ * This is a small utility providing systemd integration for XScreenSaver.
+ *
+ * When run from ~/.xsession or equivalent, this will:
+ *
+ *   - Lock the screen before the system goes to sleep (using
+ *     xscreensaver-command -suspend).
+ *
+ *   - Ensure the XScreenSaver password dialog is shown after the system
+ *     is resumed (using xscreensaver-command -deactivate).
+ *
+ * This is implemented using the recommended way to do these things
+ * nowadays, namely inhibitor locks. sd-bus is used for DBUS communication,
+ * so the only dependency is libsystemd (which you already have if you
+ * want this).
+ *
+ * https://github.com/mato/xscreensaver-systemd
+ */
+
 #include <assert.h>
 #include <err.h>
 #include <errno.h>
@@ -31,15 +67,12 @@ static int handler(sd_bus_message *m, void *arg,
      * under "Taking Delay Locks".
      */
     if (before_sleep) {
-        rc = system("xscreensaver-command -lock");
+        rc = system("xscreensaver-command -suspend");
         if (rc == -1) {
             warnx("Failed to run xscreensaver-command");
         }
         else if (WEXITSTATUS(rc) != 0) {
             warnx("xscreensaver-command failed with %d", WEXITSTATUS(rc));
-        }
-        else {
-            sleep(1);
         }
 
         if (ctx->lock) {
@@ -51,15 +84,7 @@ static int handler(sd_bus_message *m, void *arg,
         }
     }
     else {
-        rc = system("xset dpms force on");
-        if (rc == -1) {
-            warnx("Failed to run xset");
-        }
-        else if (WEXITSTATUS(rc) != 0) {
-            warnx("xset failed with %d", WEXITSTATUS(rc));
-        }
-
-        rc = system("/usr/bin/xscreensaver-command -deactivate");
+        rc = system("xscreensaver-command -deactivate");
         if (rc == -1) {
             warnx("Failed to run xscreensaver-command");
         }
