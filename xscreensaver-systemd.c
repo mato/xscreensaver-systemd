@@ -47,7 +47,7 @@ struct handler_ctx {
     sd_bus *bus;
     sd_bus_message *lock;
 };
-static struct handler_ctx global_ctx = { .bus = NULL, .lock = NULL };
+static struct handler_ctx global_ctx = { NULL, NULL };
 
 static int handler(sd_bus_message *m, void *arg,
         sd_bus_error *ret_error)
@@ -55,6 +55,9 @@ static int handler(sd_bus_message *m, void *arg,
     struct handler_ctx *ctx = arg;
     int before_sleep;
     int rc;
+    sd_bus_error error = SD_BUS_ERROR_NULL;
+    sd_bus_message *reply = NULL;
+    int fd;
 
     rc = sd_bus_message_read(m, "b", &before_sleep);
     if (rc < 0) {
@@ -76,6 +79,11 @@ static int handler(sd_bus_message *m, void *arg,
         }
 
         if (ctx->lock) {
+            /*
+             * This will release the lock, since we hold the only ref to the
+             * message, and sd_bus_message_unref() will close the underlying
+             * fd.
+             */
             sd_bus_message_unref(ctx->lock);
             ctx->lock = NULL;
         }
@@ -92,8 +100,6 @@ static int handler(sd_bus_message *m, void *arg,
             warnx("xscreensaver-command exited with %d", WEXITSTATUS(rc));
         }
 
-        sd_bus_error error = SD_BUS_ERROR_NULL;
-        sd_bus_message *reply = NULL;
         rc = sd_bus_call_method(ctx->bus,
                 "org.freedesktop.login1",
                 "/org/freedesktop/login1",
@@ -110,7 +116,9 @@ static int handler(sd_bus_message *m, void *arg,
             warnx("Failed to call Inhibit(): %s", error.message);
             goto out;
         }
-        int fd;
+        /*
+         * Verify that the reply actually contains a lock fd.
+         */
         rc = sd_bus_message_read(reply, "h", &fd);
         if (rc < 0) {
             warnx("Failed to read message: %s", strerror(-rc));
@@ -128,19 +136,36 @@ out:
 
 int main(int argc, char *argv[])
 {
-    sd_bus *bus = NULL;
+    sd_bus *bus = NULL, *user_bus = NULL;
     sd_bus_slot *slot = NULL;
     struct handler_ctx *ctx = &global_ctx;
+    sd_bus_error error = SD_BUS_ERROR_NULL;
+    sd_bus_message *reply = NULL;
+    int rc;
+    int fd;
+    const char *match =
+        "type='signal',interface='org.freedesktop.login1.Manager'"
+        ",member='PrepareForSleep'";
 
-    int rc = sd_bus_open_system(&bus);
+    rc = sd_bus_open_user(&user_bus);
+    if (rc < 0) {
+        warnx("Failed to connect to user bus: %s", strerror(-rc));
+        goto out;
+    }
+    rc = sd_bus_request_name(user_bus, "org.jwz.XScreenSaver", 0);
+    if (rc < 0) {
+        warnx("Failed to acquire well-known name: %s", strerror(-rc));
+        warnx("Is another copy of xscreensaver-systemd running?");
+        goto out;
+    }
+
+    rc = sd_bus_open_system(&bus);
     if (rc < 0) {
         warnx("Failed to connect to system bus: %s", strerror(-rc));
         goto out;
     }
     ctx->bus = bus;
 
-    sd_bus_error error = SD_BUS_ERROR_NULL;
-    sd_bus_message *reply = NULL;
     rc = sd_bus_call_method(bus,
             "org.freedesktop.login1",
             "/org/freedesktop/login1",
@@ -157,7 +182,9 @@ int main(int argc, char *argv[])
         warnx("Failed to call Inhibit(): %s", error.message);
         goto out;
     }
-    int fd;
+    /*
+     * Verify that the reply actually contains a lock fd.
+     */
     rc = sd_bus_message_read(reply, "h", &fd);
     if (rc < 0) {
         warnx("Failed to read message: %s", strerror(-rc));
@@ -166,9 +193,6 @@ int main(int argc, char *argv[])
     assert(fd >= 0);
     ctx->lock = reply;
 
-    const char *match =
-        "type='signal',interface='org.freedesktop.login1.Manager'"
-        ",member='PrepareForSleep'";
     rc = sd_bus_add_match(bus, &slot, match, handler, &global_ctx);
     if (rc < 0) {
         warnx("Failed to add match: %s", strerror(-rc));
@@ -194,10 +218,15 @@ int main(int argc, char *argv[])
     }
 
 out:
-    sd_bus_message_unref(reply);
-    sd_bus_slot_unref(slot);
-    sd_bus_unref(bus);
+    if (reply)
+        sd_bus_message_unref(reply);
+    if (slot)
+        sd_bus_slot_unref(slot);
+    if (bus)
+        sd_bus_flush_close_unref(bus);
+    if (user_bus)
+        sd_bus_flush_close_unref(user_bus);
     sd_bus_error_free(&error);
 
-    return (rc < 0) ? EXIT_FAILURE : EXIT_SUCCESS;
+    return EXIT_FAILURE;
 }
