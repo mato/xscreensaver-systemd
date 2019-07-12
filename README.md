@@ -1,6 +1,6 @@
 **xscreensaver-systemd is now integrated in [XcreenSaver 5.43](https://www.jwz.org/blog/2019/07/xscreensaver-5-43/)**. You probably want to use the version there, and get the latest XScreenSaver goodness while you're at it.
 
-If you're desperate for a version that works (sort of) with an older XScreenSaver, see the [old](/mato/xscreensaver-systemd/tree/old) branch.
+If you're desperate for a version that works (sort of) with an older XScreenSaver, see the [old](https://github.com/mato/xscreensaver-systemd/tree/old) branch.
 
 ----
 
