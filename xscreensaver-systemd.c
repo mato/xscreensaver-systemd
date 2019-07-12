@@ -70,12 +70,15 @@ static int handler(sd_bus_message *m, void *arg,
      * under "Taking Delay Locks".
      */
     if (before_sleep) {
-        rc = system("xscreensaver-command -suspend");
+        rc = system("xscreensaver-command -lock");
         if (rc == -1) {
             warnx("Failed to run xscreensaver-command");
         }
         else if (WEXITSTATUS(rc) != 0) {
             warnx("xscreensaver-command failed with %d", WEXITSTATUS(rc));
+        }
+        else {
+            sleep(1);
         }
 
         if (ctx->lock) {
