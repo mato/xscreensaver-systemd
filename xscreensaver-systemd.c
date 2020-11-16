@@ -40,7 +40,9 @@
 
 #include <stdio.h>
 #include <err.h>
+#include <poll.h>
 #include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -93,29 +95,33 @@ static char *progname;
 static char *screensaver_version;
 static int verbose_p = 0;
 
-#define DBUS_CLIENT_NAME  "org.jwz.XScreenSaver"
-#define DBUS_SERVICE_NAME "org.freedesktop.login1"
-#define DBUS_OBJECT_PATH  "/org/freedesktop/login1"
-#define DBUS_INTERFACE    "org.freedesktop.login1.Manager"
-#define DBUS_METHOD       "Inhibit"
-#define DBUS_METHOD_ARGS  "ssss"
-#define DBUS_METHOD_WHAT  "sleep"
-#define DBUS_METHOD_WHO   "xscreensaver"
-#define DBUS_METHOD_WHY   "lock screen on suspend"
-#define DBUS_METHOD_MODE  "delay"
+#define DBUS_CLIENT_NAME     "org.jwz.XScreenSaver"
+#define DBUS_SD_SERVICE_NAME "org.freedesktop.login1"
+#define DBUS_SD_OBJECT_PATH  "/org/freedesktop/login1"
+#define DBUS_SD_INTERFACE    "org.freedesktop.login1.Manager"
+#define DBUS_SD_METHOD       "Inhibit"
+#define DBUS_SD_METHOD_ARGS  "ssss"
+#define DBUS_SD_METHOD_WHAT  "sleep"
+#define DBUS_SD_METHOD_WHO   "xscreensaver"
+#define DBUS_SD_METHOD_WHY   "lock screen on suspend"
+#define DBUS_SD_METHOD_MODE  "delay"
 
-#define DBUS_MATCH "type='signal'," \
-                   "interface='" DBUS_INTERFACE "'," \
-                   "member='PrepareForSleep'"
+#define DBUS_SD_MATCH "type='signal'," \
+                      "interface='" DBUS_SD_INTERFACE "'," \
+                      "member='PrepareForSleep'"
+
+#define DBUS_FDO_NAME        "org.freedesktop.ScreenSaver"
+#define DBUS_FDO_OBJECT_PATH "/ScreenSaver"
+#define DBUS_FDO_INTERFACE   "org.freedesktop.ScreenSaver"
 
 struct handler_ctx {
   sd_bus *bus;
   sd_bus_message *lock_message;
   int lock_fd;
+  int is_inhibited;
 };
 
 static struct handler_ctx global_ctx = { NULL, NULL, -1 };
-
 
 static void
 xscreensaver_command (const char *cmd)
@@ -142,11 +148,12 @@ xscreensaver_register_sleep_lock (struct handler_ctx *ctx)
   sd_bus_message *reply = NULL;
   int fd = -1;
   int rc = sd_bus_call_method (ctx->bus,
-                               DBUS_SERVICE_NAME, DBUS_OBJECT_PATH,
-                               DBUS_INTERFACE, DBUS_METHOD, &error, &reply,
-                               DBUS_METHOD_ARGS,
-                               DBUS_METHOD_WHAT, DBUS_METHOD_WHO,
-                               DBUS_METHOD_WHY, DBUS_METHOD_MODE);
+                               DBUS_SD_SERVICE_NAME, DBUS_SD_OBJECT_PATH,
+                               DBUS_SD_INTERFACE, DBUS_SD_METHOD,
+                               &error, &reply,
+                               DBUS_SD_METHOD_ARGS,
+                               DBUS_SD_METHOD_WHAT, DBUS_SD_METHOD_WHO,
+                               DBUS_SD_METHOD_WHY, DBUS_SD_METHOD_MODE);
   if (rc < 0)
     {
       warnx ("dbus: inhibit sleep failed: %s", error.message);
@@ -171,7 +178,7 @@ xscreensaver_register_sleep_lock (struct handler_ctx *ctx)
 }
 
 
-/* Called when DBUS_INTERFACE sends a "PrepareForSleep" signal.
+/* Called when DBUS_SD_INTERFACE sends a "PrepareForSleep" signal.
    The event is sent twice: before sleep, and after.
  */
 static int
@@ -228,15 +235,78 @@ xscreensaver_systemd_handler (sd_bus_message *m, void *arg,
   return 1;  /* >= 0 means success */
 }
 
+static int
+xscreensaver_method_inhibit(sd_bus_message *m, void *arg,
+                            sd_bus_error *ret_error)
+{
+    struct handler_ctx *ctx = arg;
+    char *application_name, *inhibit_reason;
+
+    int rc = sd_bus_message_read(m, "ss", &application_name, &inhibit_reason);
+    if (rc < 0) {
+        warnx("Failed to parse method call: %s", strerror(-rc));
+        return rc;
+    }
+    /*
+     * TODO: Actually hand out and remember cookies.
+     */
+    warnx("Inhibit() called: Application: '%s': Reason: '%s'", application_name,
+        inhibit_reason);
+    ctx->is_inhibited++;
+
+    return sd_bus_reply_method_return(m, "u", 31337);
+}
+
+static int
+xscreensaver_method_uninhibit(sd_bus_message *m, void *arg,
+                              sd_bus_error *ret_error)
+{
+    struct handler_ctx *ctx = arg;
+    uint32_t cookie;
+
+    int rc = sd_bus_message_read(m, "u", &cookie);
+    if (rc < 0) {
+        warnx("Failed to parse method call: %s", strerror(-rc));
+        return rc;
+    }
+    /*
+     * TODO: Use cookies.
+     */
+    warnx("UnInhibit() called: Cookie: %u", cookie);
+    ctx->is_inhibited--;
+    if (ctx->is_inhibited < 0)
+      ctx->is_inhibited = 0;
+
+    return sd_bus_reply_method_return(m, "");
+}
+
+/*
+ * This vtable defines the service interface we implement.
+ */
+static const sd_bus_vtable
+xscreensaver_dbus_vtable[] = {
+    SD_BUS_VTABLE_START(0),
+    SD_BUS_METHOD("Inhibit", "ss", "u", xscreensaver_method_inhibit,
+                  SD_BUS_VTABLE_UNPRIVILEGED),
+    /*
+     * TODO: This method does not send a reply, is this the right thing to do?
+     */
+    SD_BUS_METHOD("UnInhibit", "u", "", xscreensaver_method_uninhibit,
+                  SD_BUS_VTABLE_UNPRIVILEGED),
+    SD_BUS_VTABLE_END
+};
+
 
 static int
 xscreensaver_systemd_loop (void)
 {
   sd_bus *bus = NULL, *user_bus = NULL;
   sd_bus_slot *slot = NULL;
+  sd_bus_slot *screensaver_slot = NULL;
   struct handler_ctx *ctx = &global_ctx;
   sd_bus_error error = SD_BUS_ERROR_NULL;
   int rc;
+  time_t last_deactivate_time = 0, now;
 
   rc = sd_bus_open_user (&user_bus);
   if (rc < 0) {
@@ -244,10 +314,30 @@ xscreensaver_systemd_loop (void)
     goto FAIL;
   }
 
+  rc = sd_bus_add_object_vtable(user_bus,
+                                &screensaver_slot,
+                                DBUS_FDO_OBJECT_PATH,
+                                DBUS_FDO_INTERFACE,
+                                xscreensaver_dbus_vtable,
+                                NULL);
+  if (rc < 0) {
+    warnx("dbus: vtable registration failed: %s", strerror(-rc));
+    goto FAIL;
+  }
+  sd_bus_slot_set_userdata(screensaver_slot, ctx);
+
+  rc = sd_bus_request_name(user_bus, DBUS_FDO_NAME, 0);
+  if (rc < 0)
+    {
+      warnx ("dbus: failed to connect as %s: %s",
+             DBUS_FDO_NAME, strerror(-rc));
+      goto FAIL;
+    }
+
   rc = sd_bus_request_name (user_bus, DBUS_CLIENT_NAME, 0);
   if (rc < 0)
     {
-      warnx ("dbus: failed to connect as %s: %s", 
+      warnx ("dbus: failed to connect as %s: %s",
              DBUS_CLIENT_NAME, strerror(-rc));
       goto FAIL;
     }
@@ -271,7 +361,7 @@ xscreensaver_systemd_loop (void)
   /* This is basically an event mask, saying that we are interested in
      "PrepareForSleep", and to run our callback when that signal is thrown.
    */
-  rc = sd_bus_add_match (bus, &slot, DBUS_MATCH,
+  rc = sd_bus_add_match (bus, &slot, DBUS_SD_MATCH,
                          xscreensaver_systemd_handler,
                          &global_ctx);
   if (rc < 0)
@@ -284,28 +374,89 @@ xscreensaver_systemd_loop (void)
    */
   while (1)
     {
-      rc = sd_bus_process (bus, NULL);
-      if (rc < 0)
+      struct pollfd fds[2];
+      uint64_t poll_timeout, timeout, user_timeout;
+
+      /*
+       * We MUST call sd_bus_process() on each bus at least once before calling
+       * sd_bus_get_events(), so just always start the event loop by processing
+       * all outstanding requests on both busses.
+       */
+      do
         {
-          warnx ("dbus: process failed: %s", strerror(-rc));
-          goto FAIL;
+          rc = sd_bus_process(bus, NULL);
+          if (rc < 0)
+            {
+               warnx("Failed to process bus: %s", strerror(-rc));
+               goto FAIL;
+            }
+        }
+      while (rc > 0);
+
+      do
+        {
+          rc = sd_bus_process(user_bus, NULL);
+          if (rc < 0)
+            {
+               warnx("Failed to process bus: %s", strerror(-rc));
+               goto FAIL;
+            }
+        }
+      while (rc > 0);
+
+      fds[0].fd = sd_bus_get_fd(bus);
+      fds[0].events = sd_bus_get_events(bus);
+      fds[0].revents = 0;
+      fds[1].fd = sd_bus_get_fd(user_bus);
+      fds[1].events = sd_bus_get_events(user_bus);
+      fds[1].revents = 0;
+
+      sd_bus_get_timeout(bus, &timeout);
+      sd_bus_get_timeout(user_bus, &user_timeout);
+      if (timeout == 0 && user_timeout == 0)
+        poll_timeout = 0;
+      else if (timeout == UINT64_MAX && user_timeout == UINT64_MAX)
+        poll_timeout = -1;
+      else
+        {
+          poll_timeout = (timeout < user_timeout) ? timeout : user_timeout;
+          poll_timeout /= 1000000;
         }
 
-      if (rc > 0)  /* Processed a request, try to do another one right away. */
-        continue;
+      /*
+       * We want to wake up at least once every 50 seconds, to de-activate
+       * the screensaver if we have been inhibited.
+       *
+       * TODO: Perhaps do this only when we know we are inhibited, but that
+       * makes the logic hairier.
+       */
+      if (poll_timeout > 50000)
+        poll_timeout = 50000;
 
-      /* Wait for the next request to process */
-      rc = sd_bus_wait (bus, (uint64_t) -1);
+      rc = poll(fds, 2, poll_timeout);
       if (rc < 0)
+        err(EXIT_FAILURE, "poll()");
+
+      if (ctx->is_inhibited)
         {
-          warnx ("dbus: wait failed: %s", strerror(-rc));
-          goto FAIL;
+          now = time(NULL);
+          if (now - last_deactivate_time >= 50)
+            {
+              xscreensaver_command("deactivate");
+              last_deactivate_time = now;
+            }
         }
     }
 
  FAIL:
+  /*
+   * TODO: Explicitly release the well-known names?
+   */
   if (slot)
     sd_bus_slot_unref (slot);
+
+  if (screensaver_slot)
+    sd_bus_slot_unref (screensaver_slot);
 
   if (bus)
     sd_bus_flush_close_unref (bus);
