@@ -104,6 +104,32 @@
  *     If it's doing the shitty thing, can we get the pid of the process on
  *     the other end of the "inhibit" request and notice when it goes away?
  *
+ *   - xscreensaver_get_cookie() can theoretically return duplicates, we
+ *     should handle that?
+ *
+ *   - xscreensaver_method_uninhibit() does not actually send a reply, are
+ *     we doing the right thing when registering it?
+ *
+ *   - run under valgrind, etc. to check for any memory leaks.
+ *
+ *   - call sd_bus_release_name() explicitly on exit?
+ *
+ * TESTING:
+ *
+ *   To call the D-BUS methods manually, you can use "busctl":
+ *
+ *   busctl --user call org.freedesktop.ScreenSaver \
+ *     /ScreenSaver org.freedesktop.ScreenSaver \
+ *     Inhibit ss test-application test-reason
+ *
+ *   This will hand out a cookie, which you can pass back to UnInhibit:
+ *
+ *   u 1792821391
+ *
+ *   busctl --user call org.freedesktop.ScreenSaver \
+ *     /ScreenSaver org.freedesktop.ScreenSaver \
+ *     UnInhibit u 1792821391
+ *
  * https://github.com/mato/xscreensaver-systemd
  */
 
@@ -376,19 +402,15 @@ xscreensaver_method_inhibit(sd_bus_message *m, void *arg,
         return rc;
     }
 
-    /*
-       TODO: xscreensaver_get_cookie() could theoretically return duplicates?
-             Figure out the PID of who sent this, save it, then periodically
-             check with kill(pid, 0) and reap those who have departed.
-    */
     entry = malloc(sizeof (struct inhibit_entry));
     entry->cookie = xscreensaver_get_cookie();
     SLIST_INSERT_HEAD(&inhibit_head, entry, entries);
     ctx->is_inhibited++;
-    warnx("Inhibit() called: Application: '%s': Reason: '%s' -> returning %u",
-        application_name,
-        inhibit_reason,
-        entry->cookie);
+    if (verbose_p)
+      warnx("Inhibit() called: Application: '%s': Reason: '%s' -> returning %u",
+          application_name,
+          inhibit_reason,
+          entry->cookie);
 
     return sd_bus_reply_method_return(m, "u", entry->cookie);
 }
@@ -421,9 +443,10 @@ xscreensaver_method_uninhibit(sd_bus_message *m, void *arg,
             break;
           }
       }
-    warnx("UnInhibit() called: Cookie: %u%s",
-        cookie,
-        found ? ": Removed" : ": Not found, ignored");
+    if (verbose_p)
+      warnx("UnInhibit() called: Cookie: %u%s",
+          cookie,
+          found ? ": Removed" : ": Not found, ignored");
 
     return sd_bus_reply_method_return(m, "");
 }
@@ -436,9 +459,6 @@ xscreensaver_dbus_vtable[] = {
     SD_BUS_VTABLE_START(0),
     SD_BUS_METHOD("Inhibit", "ss", "u", xscreensaver_method_inhibit,
                   SD_BUS_VTABLE_UNPRIVILEGED),
-    /*
-     * TODO: This method does not send a reply, is this the right thing to do?
-     */
     SD_BUS_METHOD("UnInhibit", "u", "", xscreensaver_method_uninhibit,
                   SD_BUS_VTABLE_UNPRIVILEGED),
     SD_BUS_VTABLE_END
@@ -582,11 +602,8 @@ xscreensaver_systemd_loop (void)
         }
 
       /*
-       * We want to wake up at least once every 50 seconds, to de-activate
-       * the screensaver if we have been inhibited.
-       *
-       * TODO: Perhaps do this only when we know we are inhibited, but that
-       * makes the logic hairier.
+         We want to wake up at least once every 50 seconds, to de-activate
+         the screensaver if we have been inhibited.
        */
       if (poll_timeout > 50000)
         poll_timeout = 50000;
@@ -600,6 +617,9 @@ xscreensaver_systemd_loop (void)
           now = time(NULL);
           if (now - last_deactivate_time >= 50)
             {
+              if (verbose_p)
+                warnx("%d active inhibitors, deactivating screensaver",
+                    ctx->is_inhibited);
               xscreensaver_command("deactivate");
               last_deactivate_time = now;
             }
@@ -607,9 +627,6 @@ xscreensaver_systemd_loop (void)
     }
 
  FAIL:
-  /*
-   * TODO: Explicitly release the well-known names?
-   */
   if (match_slot)
     sd_bus_slot_unref (match_slot);
 
