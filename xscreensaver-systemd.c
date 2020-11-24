@@ -205,7 +205,7 @@ static int verbose_p = 0;
 #define DBUS_FDO_INTERFACE   "org.freedesktop.ScreenSaver"
 
 struct handler_ctx {
-  sd_bus *bus;
+  sd_bus *system_bus;
   sd_bus_message *lock_message;
   int lock_fd;
   int is_inhibited;
@@ -237,7 +237,7 @@ xscreensaver_register_sleep_lock (struct handler_ctx *ctx)
   sd_bus_error error = SD_BUS_ERROR_NULL;
   sd_bus_message *reply = NULL;
   int fd = -1;
-  int rc = sd_bus_call_method (ctx->bus,
+  int rc = sd_bus_call_method (ctx->system_bus,
                                DBUS_SD_SERVICE_NAME, DBUS_SD_OBJECT_PATH,
                                DBUS_SD_INTERFACE, DBUS_SD_METHOD,
                                &error, &reply,
@@ -390,9 +390,9 @@ xscreensaver_dbus_vtable[] = {
 static int
 xscreensaver_systemd_loop (void)
 {
-  sd_bus *bus = NULL, *user_bus = NULL;
-  sd_bus_slot *slot = NULL;
-  sd_bus_slot *screensaver_slot = NULL;
+  sd_bus *system_bus = NULL, *user_bus = NULL;
+  sd_bus_slot *match_slot = NULL;
+  sd_bus_slot *object_slot = NULL;
   struct handler_ctx *ctx = &global_ctx;
   sd_bus_error error = SD_BUS_ERROR_NULL;
   int rc;
@@ -409,7 +409,7 @@ xscreensaver_systemd_loop (void)
   }
 
   rc = sd_bus_add_object_vtable(user_bus,
-                                &screensaver_slot,
+                                &object_slot,
                                 DBUS_FDO_OBJECT_PATH,
                                 DBUS_FDO_INTERFACE,
                                 xscreensaver_dbus_vtable,
@@ -418,7 +418,7 @@ xscreensaver_systemd_loop (void)
     warnx("dbus: vtable registration failed: %s", strerror(-rc));
     goto FAIL;
   }
-  sd_bus_slot_set_userdata(screensaver_slot, ctx);
+  sd_bus_slot_set_userdata(object_slot, ctx);
 
   rc = sd_bus_request_name(user_bus, DBUS_FDO_NAME, 0);
   if (rc < 0)
@@ -437,12 +437,12 @@ xscreensaver_systemd_loop (void)
     }
 
 
-  /* 'bus' is where we hold a lock on org.freedesktop.login1, meaning that
-     the system will send us a PrepareForSleep message when the system is
+  /* 'system_bus' is where we hold a lock on org.freedesktop.login1, meaning
+     that the system will send us a PrepareForSleep message when the system is
      about to suspend.
    */
 
-  rc = sd_bus_open_system (&bus);
+  rc = sd_bus_open_system (&system_bus);
   if (rc < 0)
     {
       warnx ("dbus: open failed: %s", strerror(-rc));
@@ -452,7 +452,7 @@ xscreensaver_systemd_loop (void)
   /* Obtain a lock fd from the "Inhibit" method, so that we can delay
      sleep when a "PrepareForSleep" signal is posted. */
 
-  ctx->bus = bus;
+  ctx->system_bus = system_bus;
   rc = xscreensaver_register_sleep_lock (ctx);
   if (rc < 0)
     goto FAIL;
@@ -461,7 +461,7 @@ xscreensaver_systemd_loop (void)
   /* This is basically an event mask, saying that we are interested in
      "PrepareForSleep", and to run our callback when that signal is thrown.
    */
-  rc = sd_bus_add_match (bus, &slot, DBUS_SD_MATCH,
+  rc = sd_bus_add_match (system_bus, &match_slot, DBUS_SD_MATCH,
                          xscreensaver_systemd_handler,
                          &global_ctx);
   if (rc < 0)
@@ -484,7 +484,7 @@ xscreensaver_systemd_loop (void)
        */
       do
         {
-          rc = sd_bus_process(bus, NULL);
+          rc = sd_bus_process(system_bus, NULL);
           if (rc < 0)
             {
                warnx("Failed to process bus: %s", strerror(-rc));
@@ -504,14 +504,14 @@ xscreensaver_systemd_loop (void)
         }
       while (rc > 0);
 
-      fds[0].fd = sd_bus_get_fd(bus);
-      fds[0].events = sd_bus_get_events(bus);
+      fds[0].fd = sd_bus_get_fd(system_bus);
+      fds[0].events = sd_bus_get_events(system_bus);
       fds[0].revents = 0;
       fds[1].fd = sd_bus_get_fd(user_bus);
       fds[1].events = sd_bus_get_events(user_bus);
       fds[1].revents = 0;
 
-      sd_bus_get_timeout(bus, &timeout);
+      sd_bus_get_timeout(system_bus, &timeout);
       sd_bus_get_timeout(user_bus, &user_timeout);
       if (timeout == 0 && user_timeout == 0)
         poll_timeout = 0;
@@ -552,14 +552,14 @@ xscreensaver_systemd_loop (void)
   /*
    * TODO: Explicitly release the well-known names?
    */
-  if (slot)
-    sd_bus_slot_unref (slot);
+  if (match_slot)
+    sd_bus_slot_unref (match_slot);
 
-  if (screensaver_slot)
-    sd_bus_slot_unref (screensaver_slot);
+  if (object_slot)
+    sd_bus_slot_unref (object_slot);
 
-  if (bus)
-    sd_bus_flush_close_unref (bus);
+  if (system_bus)
+    sd_bus_flush_close_unref (system_bus);
 
   if (user_bus)
     sd_bus_flush_close_unref (user_bus);
