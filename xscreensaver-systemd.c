@@ -92,6 +92,14 @@
  *     inhibit when video is playing.
  *
  *
+ *   - Chrome:
+ *
+ *     As for Firefox, but Chrome calls the "org.freedesktop.ScreenSaver"
+ *     target with an object path of "/org/freedesktop/ScreenSaver". Unlike
+ *     Firefox, Chrome does not send an "inhibit" message when only audio is
+ *     playing.
+ *
+ *
  * TO DO:
  *
  *   - Currently this code is only listening to "org.freedesktop.ScreenSaver".
@@ -227,9 +235,10 @@ static int verbose_p = 0;
                       "interface='" DBUS_SD_INTERFACE "'," \
                       "member='PrepareForSleep'"
 
-#define DBUS_FDO_NAME        "org.freedesktop.ScreenSaver"
-#define DBUS_FDO_OBJECT_PATH "/ScreenSaver"
-#define DBUS_FDO_INTERFACE   "org.freedesktop.ScreenSaver"
+#define DBUS_FDO_NAME          "org.freedesktop.ScreenSaver"
+#define DBUS_FDO_OBJECT_PATH   "/ScreenSaver"
+#define DBUS_FDO_OBJECT_PATH_2 "/org/freedesktop/ScreenSaver"
+#define DBUS_FDO_INTERFACE     "org.freedesktop.ScreenSaver"
 
 struct handler_ctx {
   sd_bus *system_bus;
@@ -487,6 +496,17 @@ xscreensaver_systemd_loop (void)
   rc = sd_bus_add_object_vtable(user_bus,
                                 NULL,
                                 DBUS_FDO_OBJECT_PATH,
+                                DBUS_FDO_INTERFACE,
+                                xscreensaver_dbus_vtable,
+                                &global_ctx);
+  if (rc < 0) {
+    warnx("dbus: vtable registration failed: %s", strerror(-rc));
+    goto FAIL;
+  }
+
+  rc = sd_bus_add_object_vtable(user_bus,
+                                NULL,
+                                DBUS_FDO_OBJECT_PATH_2,
                                 DBUS_FDO_INTERFACE,
                                 xscreensaver_dbus_vtable,
                                 &global_ctx);
