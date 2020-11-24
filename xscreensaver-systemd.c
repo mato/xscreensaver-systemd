@@ -469,8 +469,6 @@ static int
 xscreensaver_systemd_loop (void)
 {
   sd_bus *system_bus = NULL, *user_bus = NULL;
-  sd_bus_slot *match_slot = NULL;
-  sd_bus_slot *object_slot = NULL;
   struct handler_ctx *ctx = &global_ctx;
   sd_bus_error error = SD_BUS_ERROR_NULL;
   int rc;
@@ -487,16 +485,15 @@ xscreensaver_systemd_loop (void)
   }
 
   rc = sd_bus_add_object_vtable(user_bus,
-                                &object_slot,
+                                NULL,
                                 DBUS_FDO_OBJECT_PATH,
                                 DBUS_FDO_INTERFACE,
                                 xscreensaver_dbus_vtable,
-                                NULL);
+                                &global_ctx);
   if (rc < 0) {
     warnx("dbus: vtable registration failed: %s", strerror(-rc));
     goto FAIL;
   }
-  sd_bus_slot_set_userdata(object_slot, ctx);
 
   rc = sd_bus_request_name(user_bus, DBUS_FDO_NAME, 0);
   if (rc < 0)
@@ -539,7 +536,7 @@ xscreensaver_systemd_loop (void)
   /* This is basically an event mask, saying that we are interested in
      "PrepareForSleep", and to run our callback when that signal is thrown.
    */
-  rc = sd_bus_add_match (system_bus, &match_slot, DBUS_SD_MATCH,
+  rc = sd_bus_add_match (system_bus, NULL, DBUS_SD_MATCH,
                          xscreensaver_systemd_handler,
                          &global_ctx);
   if (rc < 0)
@@ -627,12 +624,6 @@ xscreensaver_systemd_loop (void)
     }
 
  FAIL:
-  if (match_slot)
-    sd_bus_slot_unref (match_slot);
-
-  if (object_slot)
-    sd_bus_slot_unref (object_slot);
-
   if (system_bus)
     sd_bus_flush_close_unref (system_bus);
 
