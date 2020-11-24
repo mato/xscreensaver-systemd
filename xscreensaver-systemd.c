@@ -111,6 +111,7 @@
 # include "config.h"
 #endif
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <err.h>
 #include <poll.h>
@@ -178,7 +179,7 @@
 
 #endif /* !HAVE_LIBSYSTEMD */
 
-
+#include "queue.h"
 #include "version.h"
 
 static char *progname;
@@ -212,6 +213,14 @@ struct handler_ctx {
 };
 
 static struct handler_ctx global_ctx = { NULL, NULL, -1 };
+
+SLIST_HEAD(inhibit_head, inhibit_entry) inhibit_head =
+  SLIST_HEAD_INITIALIZER(inhibit_head);
+
+struct inhibit_entry {
+  uint32_t cookie;
+  SLIST_ENTRY(inhibit_entry) entries;
+};
 
 static void
 xscreensaver_command (const char *cmd)
@@ -325,26 +334,63 @@ xscreensaver_systemd_handler (sd_bus_message *m, void *arg,
   return 1;  /* >= 0 means success */
 }
 
+static uint32_t
+xscreensaver_get_cookie(void)
+{
+    uint32_t cookie = 0;
+    static int use_rand48 = 0;
+    int rc;
+
+    if (use_rand48)
+      {
+        cookie = lrand48();
+      }
+    else
+      {
+        /* According to the manpage may fail with ENOSYS on some kernels,
+           so just fall back to lrand48() if that (or any other failure)
+           happens. */
+        rc = getentropy(&cookie, sizeof cookie);
+        if (rc != 0)
+          {
+            warn("getentropy() failed, falling back to lrand48()");
+            srand48(time(NULL));
+            use_rand48 = 1;
+            cookie = lrand48();
+          }
+      }
+    return cookie;
+}
+
 static int
 xscreensaver_method_inhibit(sd_bus_message *m, void *arg,
                             sd_bus_error *ret_error)
 {
     struct handler_ctx *ctx = arg;
     char *application_name, *inhibit_reason;
+    struct inhibit_entry *entry;
 
     int rc = sd_bus_message_read(m, "ss", &application_name, &inhibit_reason);
     if (rc < 0) {
         warnx("Failed to parse method call: %s", strerror(-rc));
         return rc;
     }
-    /*
-     * TODO: Actually hand out and remember cookies.
-     */
-    warnx("Inhibit() called: Application: '%s': Reason: '%s'", application_name,
-        inhibit_reason);
-    ctx->is_inhibited++;
 
-    return sd_bus_reply_method_return(m, "u", 31337);
+    /*
+       TODO: xscreensaver_get_cookie() could theoretically return duplicates?
+             Figure out the PID of who sent this, save it, then periodically
+             check with kill(pid, 0) and reap those who have departed.
+    */
+    entry = malloc(sizeof (struct inhibit_entry));
+    entry->cookie = xscreensaver_get_cookie();
+    SLIST_INSERT_HEAD(&inhibit_head, entry, entries);
+    ctx->is_inhibited++;
+    warnx("Inhibit() called: Application: '%s': Reason: '%s' -> returning %u",
+        application_name,
+        inhibit_reason,
+        entry->cookie);
+
+    return sd_bus_reply_method_return(m, "u", entry->cookie);
 }
 
 static int
@@ -353,19 +399,31 @@ xscreensaver_method_uninhibit(sd_bus_message *m, void *arg,
 {
     struct handler_ctx *ctx = arg;
     uint32_t cookie;
+    struct inhibit_entry *entry;
+    int found = 0;
 
     int rc = sd_bus_message_read(m, "u", &cookie);
     if (rc < 0) {
         warnx("Failed to parse method call: %s", strerror(-rc));
         return rc;
     }
-    /*
-     * TODO: Use cookies.
-     */
-    warnx("UnInhibit() called: Cookie: %u", cookie);
-    ctx->is_inhibited--;
-    if (ctx->is_inhibited < 0)
-      ctx->is_inhibited = 0;
+
+    SLIST_FOREACH(entry, &inhibit_head, entries)
+      {
+        if (entry->cookie == cookie)
+          {
+            SLIST_REMOVE(&inhibit_head, entry, inhibit_entry, entries);
+            free(entry);
+            ctx->is_inhibited--;
+            if (ctx->is_inhibited < 0)
+              ctx->is_inhibited = 0;
+            found = 1;
+            break;
+          }
+      }
+    warnx("UnInhibit() called: Cookie: %u%s",
+        cookie,
+        found ? ": Removed" : ": Not found, ignored");
 
     return sd_bus_reply_method_return(m, "");
 }
