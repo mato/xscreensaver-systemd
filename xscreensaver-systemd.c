@@ -41,7 +41,7 @@
  *   was playing, and ceased when the video was paused or stopped.  The
  *   reason to do it as a heartbeat rather than a toggle is so that the
  *   player fails SAFE -- if the player exits abnormally, the heart
- *   stops beating, and screen saving and locking resumes. 
+ *   stops beating, and screen saving and locking resumes.
  *
  *
  *   - MPlayer and MPV:
@@ -160,7 +160,7 @@
  static sd_bus *sd_bus_flush_close_unref(sd_bus *bus) { return 0; }
  static sd_bus_slot *sd_bus_slot_unref(sd_bus_slot *slot) { return 0; }
  static void sd_bus_message_ref(sd_bus_message *r) { }
- static int sd_bus_reply_method_return (sd_bus_message *call, 
+ static int sd_bus_reply_method_return (sd_bus_message *call,
                                         const char *types, ...) { return -1; }
  struct sd_bus_vtable { int x; };
  typedef struct sd_bus_vtable sd_bus_vtable;
@@ -169,7 +169,7 @@
 # define SD_BUS_METHOD(_member, _signature, _result, _handler, _flags) { 0 }
  static int sd_bus_add_object_vtable(sd_bus *bus, sd_bus_slot **slot,
                                      const char *path, const char *interface,
-                                     const sd_bus_vtable *vtable, 
+                                     const sd_bus_vtable *vtable,
                                      void *userdata) { return -1; }
  static void *sd_bus_slot_set_userdata(sd_bus_slot *s, void *d) { return 0; }
  static int sd_bus_get_fd(sd_bus *bus) { return -1; }
@@ -399,7 +399,7 @@ xscreensaver_systemd_loop (void)
   time_t last_deactivate_time = 0, now;
 
   /* 'user_bus' is where we receive messages from other programs sending
-     inhibit/uninhibit to org.freedesktop.ScreenSaver, etc. 
+     inhibit/uninhibit to org.freedesktop.ScreenSaver, etc.
    */
 
   rc = sd_bus_open_user (&user_bus);
