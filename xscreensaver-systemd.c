@@ -16,20 +16,93 @@
  * NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *
- * This is a small utility providing systemd integration for XScreenSaver.
  *
- * When run from ~/.xsession or equivalent, this will:
+ * This utility provides systemd integration for XScreenSaver.
+ * It does two things:
  *
- *   - Lock the screen before the system goes to sleep (using
- *     xscreensaver-command -suspend).
+ *   - When the system is about to go to sleep (e.g., laptop lid closing)
+ *     it locks the screen *before* the system goes to sleep, by running
+ *     "xscreensaver-command -suspend".  And then when the system wakes
+ *     up again, it runs "xscreensaver-command -deactivate" to force the
+ *     unlock dialog to appear immediately.
  *
- *   - Ensure the XScreenSaver password dialog is shown after the system
- *     is resumed (using xscreensaver-command -deactivate).
+ *   - When another process on the system makes asks for the screen saver
+ *     to be inhibited (e.g. because a video is playing) this program
+ *     periodically runs "xscreensaver-command -deactivate" to keep the
+ *     display un-blanked.  It does this until the other program asks for
+ *     it to stop.
  *
- * This is implemented using the recommended way to do these things
- * nowadays, namely inhibitor locks. sd-bus is used for DBUS communication,
- * so the only dependency is libsystemd (which you already have if you
- * want this).
+ *
+ * BACKGROUND:
+ *
+ *   For decades, the traditional way for a video player to temporarily
+ *   inhibit the screen saver was to have a heartbeat command that ran
+ *   "xscreensaver-command -deactivate" once a minute while the video
+ *   was playing, and ceased when the video was paused or stopped.  The
+ *   reason to do it as a heartbeat rather than a toggle is so that the
+ *   player fails SAFE -- if the player exits abnormally, the heart
+ *   stops beating, and screen saving and locking resumes. 
+ *
+ *
+ *   - MPlayer and MPV:
+ *
+ *     Some time in 2018 or 2019, the authors of MPlayer and MPV decided to
+ *     remove this functionality because... they're idiots?  They don't run
+ *     screen savers?  They don't understand how any of this works?  I can
+ *     only speculate.
+ *
+ *     Currently (late 2020) MPlayer and MPV call only XResetScreenSaver()
+ *     as their heartbeat.  But that only affects the X11 server's built-in
+ *     screen saver, not a userspace screen locker like xscreensaver.
+ *
+ *     They also call XScreenSaverSuspend() which is part of the MIT
+ *     SCREEN-SAVER server extension.  XScreenSaver does make use of that
+ *     extension because it is worse than useless.  See commentary atop
+ *     xscreensaver.c for details.
+ *
+ *
+ *   - VLC:
+ *
+ *     In some circumstances, VLC will send "inhibit" messages to one of
+ *     these DBUS targets: "org.freedesktop.ScreenSaver",
+ *     "org.freedesktop.PowerManagement.Inhibit", "org.mate.SessionManager",
+ *     and/or "org.gnome.SessionManager".
+ *
+ *     In some other circumstances, it will run "xdg-screensaver reset" as
+ *     a heartbeat.  That is a shell script that tries to figure out which
+ *     desktop environment is being used, and will eventually run
+ *     "xscreensaver-command -deactivate".
+ *
+ *     I can't tell how VLC decides which of these methods to use.
+ *
+ *
+ *   - Firefox:
+ *
+ *     When playing media, Firefox will send "inhibit" to one of these
+ *     targets: "org.freedesktop.ScreenSaver", or "org.gnome.SessionManager".
+ *
+ *     However, Firefox decides which, if any, of those to use at launch time,
+ *     and does not revisit that decision.  So if xscreensaver-systemd has not
+ *     been launched before Firefox, it won't work.  Fortunately, in most use
+ *     cases, xscreensaver will have been launched earlier in the startup
+ *     sequence than the web browser.
+ *
+ *     Also, firefox sends an "inhibit" message when it is merely playing
+ *     audio.  That's horrible.  We should ignore those messages and only
+ *     inhibit when video is playing.
+ *
+ *
+ * TO DO:
+ *
+ *   - Currently this code is only listening to "org.freedesktop.ScreenSaver".
+ *     It should listen to all the others too, because why not.
+ *
+ *   - What happens if Firefox is playing a video, and has requested to
+ *     inhibit the saver, and then is killed with -9?  Do we get a signal to
+ *     uninhibit, or is it back to not failing safe?
+ *
+ *     If it's doing the shitty thing, can we get the pid of the process on
+ *     the other end of the "inhibit" request and notice when it goes away?
  *
  * https://github.com/mato/xscreensaver-systemd
  */
@@ -47,6 +120,8 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <time.h>
+#include <sys/time.h>
 
 #ifdef HAVE_LIBSYSTEMD
 # include <systemd/sd-bus.h>
@@ -82,10 +157,25 @@
                              sd_bus_message_handler_t callback, void *userdata)
    { return -1; }
  static int sd_bus_process(sd_bus *bus, sd_bus_message **r) { return -1; }
- static int sd_bus_wait(sd_bus *bus, uint64_t timeout_usec) { return -1; }
  static sd_bus *sd_bus_flush_close_unref(sd_bus *bus) { return 0; }
  static sd_bus_slot *sd_bus_slot_unref(sd_bus_slot *slot) { return 0; }
  static void sd_bus_message_ref(sd_bus_message *r) { }
+ static int sd_bus_reply_method_return (sd_bus_message *call, 
+                                        const char *types, ...) { return -1; }
+ struct sd_bus_vtable { int x; };
+ typedef struct sd_bus_vtable sd_bus_vtable;
+# define SD_BUS_VTABLE_START(_flags) { 0 }
+# define SD_BUS_VTABLE_END /**/
+# define SD_BUS_METHOD(_member, _signature, _result, _handler, _flags) { 0 }
+ static int sd_bus_add_object_vtable(sd_bus *bus, sd_bus_slot **slot,
+                                     const char *path, const char *interface,
+                                     const sd_bus_vtable *vtable, 
+                                     void *userdata) { return -1; }
+ static void *sd_bus_slot_set_userdata(sd_bus_slot *s, void *d) { return 0; }
+ static int sd_bus_get_fd(sd_bus *bus) { return -1; }
+ static int sd_bus_get_events(sd_bus *bus) { return -1; }
+ static int sd_bus_get_timeout (sd_bus *bus, uint64_t *u) { return -1; }
+
 #endif /* !HAVE_LIBSYSTEMD */
 
 
@@ -308,6 +398,10 @@ xscreensaver_systemd_loop (void)
   int rc;
   time_t last_deactivate_time = 0, now;
 
+  /* 'user_bus' is where we receive messages from other programs sending
+     inhibit/uninhibit to org.freedesktop.ScreenSaver, etc. 
+   */
+
   rc = sd_bus_open_user (&user_bus);
   if (rc < 0) {
     warnx ("dbus: connection failed: %s", strerror(-rc));
@@ -341,6 +435,12 @@ xscreensaver_systemd_loop (void)
              DBUS_CLIENT_NAME, strerror(-rc));
       goto FAIL;
     }
+
+
+  /* 'bus' is where we hold a lock on org.freedesktop.login1, meaning that
+     the system will send us a PrepareForSleep message when the system is
+     about to suspend.
+   */
 
   rc = sd_bus_open_system (&bus);
   if (rc < 0)
@@ -476,6 +576,9 @@ usage: %s [-verbose]\n\
 This program is launched by the xscreensaver daemon to monitor DBus.\n\
 It invokes 'xscreensaver-command' to tell the xscreensaver daemon to lock\n\
 the screen before the system suspends, e.g., when a laptop's lid is closed.\n\
+\n\
+It also responds to certain messages sent by media players allowing them to\n\
+request that the screen not be blanked during playback.\n\
 \n\
 From XScreenSaver %s, (c) 1991-%s Jamie Zawinski <jwz@jwz.org>.\n";
 
